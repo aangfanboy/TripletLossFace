@@ -17,4 +17,6 @@ This repo is about face recognition and triplet loss. I trained that model with 
 Everythin about data is running by ```main_data_engine.py```. And everything about model training is ```main_model_engine.py```'s  job. I use ```face_recognition_tester.py``` for generating images above.
 
 
+I will share model files soon.
+
 Please contact me if you have a question, i will be honored to answer.
