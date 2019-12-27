@@ -8,8 +8,6 @@ This repo is about face recognition and triplet loss. I trained that model with 
 
 ![](https://i.ibb.co/qYz9K6D/bbt3.png)
 
-![](https://i.ibb.co/Cm1yZk9/witcher2.png)
-
 ![](https://i.ibb.co/hMXYKyQ/witcher1.png)
 
 # Explain Code!
