@@ -67,7 +67,7 @@ class FaceExtractor:
         
         return scale
 
-    def detect(self, frame, w_i: float = 30., h_i: float = 20., confidence_th: float = 0.8):
+    def detect(self, frame, w_i: float = 20., h_i: float = 10., confidence_th: float = 0.95):
         w, h = frame.shape[0], frame.shape[1]
         faces = []
         frames_all = []

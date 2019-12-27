@@ -89,7 +89,7 @@ class Engine:
 
 			for key in self.json:
 				oo = self.json[key]
-				dist = self.cosine_loss(tf.convert_to_tensor(oo), output[i]).numpy()
+				dist = abs(-1 - self.cosine_loss(tf.convert_to_tensor(oo), output[i]).numpy())
 
 				if dist < min_im[0]:
 					min_im = (dist, key)
@@ -123,7 +123,7 @@ class Engine:
 			color = self.colors[who]
 			x1, x2, y1, y2 = frame
 			cv2.rectangle(image, (x1, y1), (x2, y2), color, 4)
-			cv2.putText(image, f"{who}-{round(float(confidance), 2)}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3, cv2.LINE_AA) 
+			cv2.putText(image, f"{who}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3, cv2.LINE_AA) # -{round(float(confidance), 2)}
 
 		if turn_rgb:
 			image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -173,6 +173,7 @@ class Engine:
 if __name__ == '__main__':
 	engine = Engine(model_path="models/triplet_inception_resnet_v1_0.h5")
 
+	"""
 	engine.label_person("examples/witcher3/marilka.png", "marilka", True)
 	engine.label_person("examples/witcher3/cirilla.jpeg", "cirilla", True)
 	engine.label_person("examples/witcher3/tissaia.jpg", "tissaia", True)
@@ -201,9 +202,11 @@ if __name__ == '__main__':
 	engine.label_person("examples/bbt/rajesh.jpg", "rajesh", True)
 	engine.label_person("examples/bbt/sheldon.jpg", "sheldon", True)
 
+	"""
+
 	engine.create_color_map()
 
-	for path in tf.io.gfile.glob("examples/bbt/allatonce*.*"):
+	for path in tf.io.gfile.glob("examples/silicon_valley/allatonce*.*"):
 		try:
 			engine.show_who_in_image(path, True)
 		except Exception as e:
