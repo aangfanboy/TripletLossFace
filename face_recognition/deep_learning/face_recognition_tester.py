@@ -173,7 +173,6 @@ class Engine:
 if __name__ == '__main__':
 	engine = Engine(model_path="models/triplet_inception_resnet_v1_0.h5")
 
-	"""
 	engine.label_person("examples/witcher3/marilka.png", "marilka", True)
 	engine.label_person("examples/witcher3/cirilla.jpeg", "cirilla", True)
 	engine.label_person("examples/witcher3/tissaia.jpg", "tissaia", True)
@@ -188,11 +187,6 @@ if __name__ == '__main__':
 	engine.label_person("examples/silicon_valley/jared.jpeg", "jared", True)
 	engine.label_person("examples/silicon_valley/monica.jpg", "monica", True)
 	engine.label_person("examples/silicon_valley/richard.png", "richard", True)
-
-	engine.label_person("examples/random/ki1.jpg", "melis", True)
-	engine.label_person("examples/random/h1.jpg", "hannah", True)
-	engine.label_person("examples/random/t1.jpg", "tugba", True)
-	engine.label_person("examples/random/hi1.png", "hilal", True)
 	
 	engine.label_person("examples/bbt/amy.jpg", "amy", True)
 	engine.label_person("examples/bbt/bernadette.jpg", "bernadette", True)
@@ -202,11 +196,9 @@ if __name__ == '__main__':
 	engine.label_person("examples/bbt/rajesh.jpg", "rajesh", True)
 	engine.label_person("examples/bbt/sheldon.jpg", "sheldon", True)
 
-	"""
-
 	engine.create_color_map()
 
-	for path in tf.io.gfile.glob("examples/silicon_valley/allatonce*.*"):
+	for path in tf.io.gfile.glob("examples/*/*.*"):
 		try:
 			engine.show_who_in_image(path, True)
 		except Exception as e:

@@ -43,7 +43,7 @@ class MainModel:
 		positive_dist = tf.reduce_sum(tf.square(tf.subtract(anchor, positive)), 1)
 		negative_dist = tf.reduce_sum(tf.square(tf.subtract(anchor, negative)), 1)
 
-		loss_1 = tf.add(tf.subtract(positive_dist, negative_dist), 1.0)
+		loss_1 = tf.add(tf.subtract(positive_dist, negative_dist), 0.2)
 		loss = tf.reduce_mean(tf.maximum(loss_1, 0.0), 0)
 
 		return loss
@@ -52,7 +52,15 @@ class MainModel:
 	def train_step(self, x, y):
 		with tf.GradientTape() as tape:
 			output = self.model(x, training=True)
-			loss = self._loss_function(y, output)
+			if self.use_center_loss:
+				features, output = output
+				center_loss = self.center_loss(features, y, 0.95)
+				loss = self._loss_function(y, output)
+
+				loss = (center_loss*self.center_lambda) + loss
+
+			else:
+				loss = self._loss_function(y, output)
 
 		gradients = tape.gradient(loss, self.model.trainable_variables)
 		self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
@@ -63,9 +71,28 @@ class MainModel:
 	def test_step(self, x, y):
 		with tf.GradientTape() as tape:
 			output = self.model(x, training=False)
-			loss = self._loss_function(y, output)
+			if self.use_center_loss:
+				features, output = output
+				center_loss = self.center_loss(features, y, 0.95)
+				loss = self._loss_function(y, output)
+
+				loss = (center_loss*self.center_lambda) + loss
+
+			else:
+				loss = self._loss_function(y, output)
 
 		return loss, output
+
+	def center_loss(self, features, label, alfa):
+		label = tf.reshape(tf.argmax(label, -1), [-1])
+
+		centers_batch = tf.gather(self.centers, label)
+		diff = (1 - alfa) * (centers_batch - features)
+		self.centers = tf.compat.v1.scatter_sub(self.centers, label, diff)
+		with tf.control_dependencies([self.centers]):
+			loss = tf.reduce_mean(tf.square(features - centers_batch))
+
+		return loss
 
 	@tf.function
 	def lossles_test(self, x):
@@ -108,10 +135,26 @@ class MainModel:
 
 		return dataset
 
-
-	def __init__(self, mode: str = "softmax", selected_loss=None, y_map=None):
+	def __init__(self, mode: str = "softmax", use_center_loss: bool = False, selected_loss=None, y_map=None):
 		self.mode = mode
 		self._loss_function = None
+		self.use_center_loss = use_center_loss
+
+		if y_map is None:
+			y_map = self.data_engine.real_y_map
+
+		self.reverse_y_map = {v: k for k, v in y_map.items()}
+		self.reverse_y_map_length = len(self.reverse_y_map)
+		self.y_map = y_map
+
+		self.center_lambda = 0.5
+
+		if self.use_center_loss:
+			if os.path.exists(f"models/centers_for_{self.mode}_{self.name}.npy"):
+				self.centers = tf.Variable(np.load(f"models/centers_for_{self.mode}_{self.name}.npy"), trainable=False)
+			else:
+				init = tf.constant_initializer(0.)
+				self.centers = tf.Variable(init([self.reverse_y_map_length, self.n_features]), trainable=False)
 
 		if selected_loss is None:
 			if self.mode == "triplet":
@@ -127,13 +170,6 @@ class MainModel:
 				raise Exception(f"ERROR, {self.mode} is not an option. Use: 'triplet', 'softmax' or 'sparse softmax' ")
 		if selected_loss is not None:
 			self._loss_function = selected_loss
-
-		if y_map is None:
-			y_map = self.data_engine.real_y_map
-
-		self.reverse_y_map = {v: k for k, v in y_map.items()}
-		self.reverse_y_map_length = len(self.reverse_y_map)
-		self.y_map = y_map
 
 		self.dataset_train = self.set_dataset_ready(self.data_engine.dataset_train)
 		self.dataset_test = self.set_dataset_ready(self.data_engine.dataset_test)
@@ -235,6 +271,8 @@ class MainModel:
 
 				if bar._seen_so_far % n == 0:
 					self.model.save(self.new_name)
+					if self.use_center_loss:
+						np.save(f"models/centers_for_{self.mode}_{self.name}.npy", self.centers.numpy())
 
 					if self.mode == "triplet":
 						self.test_with_created_data(epoch)
@@ -258,6 +296,8 @@ class MainModel:
 				self.test_with_created_data(epoch)
 
 			self.model.save(self.new_name)
+			if self.use_center_loss:
+				np.save(f"models/centers_for_{self.mode}_{self.name}.npy", self.centers.numpy())
 
 	def test_without_monitoring(self,  dataset=None, use_accuracy: bool = False):
 		if dataset is None:
@@ -329,195 +369,10 @@ class MainModel:
 					cv2.waitKey(0)		 
 
 
-class Xception(MainModel):
-	name = "xception"
-
-	def __init__(self, data_engine, generator_dataset_train, generator_dataset_test, batch_size: int, epochs: int, lr: float, mode: str = "softmax",
-		selected_loss=None, y_map=None, input_shape: tuple = (128, 128, 3), kernel_regularizer=tf.keras.regularizers.l2(), model_id: int = 0,
-		n_features: int = 128, pooling=tf.keras.layers.GlobalAveragePooling2D, bn_at_the_end: bool = False, new_name: str = None
-		):
-
-		self.model_path = f"models/{mode}_xception_0.h5"
-		self.data_engine = data_engine
-		self.generator_dataset_train = generator_dataset_train
-		self.generator_dataset_test = generator_dataset_test
-		self.batch_size = batch_size
-		self.epochs = epochs
-		self.optimizer = tf.keras.optimizers.Adam(lr)
-		self.n_features = n_features
-		self.pooling = pooling
-		self.input_shape = input_shape
-		self.bn_at_the_end = bn_at_the_end
-		self.kernel_regularizer = kernel_regularizer
-
-		os.makedirs("models", exist_ok=True)
-
-		self.tensorboard = TensorBoardCallback(logdir="graphs/")
-
-		print(f"Activated Model --> {self.name}")
-
-		if new_name is None:
-			self.new_name = self.model_path
-
-		# self.new_name = f"models/{new_name}.h5"
-		# self.model_path = f"models/{new_name}.h5"
-
-		super().__init__(mode, selected_loss, y_map)
-
-	def make_model_ready(self, model, new_activation):
-		for layer in model.layers:
-			if self.kernel_regularizer is not None:
-				layer.kernel_regularizer = self.kernel_regularizer
-
-			try:
-				if layer.activation is None or layer.activation is not tf.keras.activations.linear:
-					layer.activation = new_activation
-			except AttributeError:
-				pass
-
-		return model
-
-	def get_model(self, new_activation=tf.keras.layers.ReLU(), dropout_rate: float = 0.0, from_softmax=False, from_triplet=False, freeze=False):
-		if freeze and not from_triplet:
-			raise Exception("if you want to use 'freeze', you must set 'from_triplet' to True.")
-
-		path = self.model_path
-		if from_softmax:
-			path = path.replace(self.mode, "softmax")
-		if from_triplet:
-			path = path.replace(self.mode, "triplet")
-
-		if tf.io.gfile.exists(path):
-			model = tf.keras.models.load_model(path, {"ReLU": tf.keras.layers.ReLU})  # {"LeakyReLU": tf.keras.layers.LeakyReLU}
-
-			if self.mode == "triplet" and from_softmax:
-				model = tf.keras.models.Model(model.layers[0].input, model.layers[-2].output) 
-				print("BE CAREFUL, DENSE LAYER HAS BEEN REMOVED")
-
-				if not self.bn_at_the_end and "BatchNormalization" in str(model.layers[-1]):
-					model = tf.keras.models.Model(model.layers[0].input, model.layers[-2].output) 
-					print("BE CAREFUL, BatchNormalization LAYER HAS BEEN REMOVED")					
-
-				model.layers[-1].activation = None
-
-			if (self.mode == "softmax" or self.mode == "sparse softmax") and from_triplet:
-				model.layers[-1].activation = tf.keras.layers.ReLU()
-				x = model.layers[-1].output
-				if self.bn_at_the_end:
-					x = tf.keras.layers.BatchNormalization(name="batch_norm_mine")(x)
-
-				x = tf.keras.layers.Dense(self.reverse_y_map_length, activation=None, name="dense_mine")(x)
-				model = tf.keras.models.Model(model.layers[0].input, x)
-
-				if freeze:
-					ii = 1
-					if self.bn_at_the_end:
-						ii += 1
-
-					ii += 1  # for relu outputs
-
-					for layer in model.layers:
-						layer.trainable = False
-
-					for nn in range(ii):
-						model.layers[-(nn+1)].trainable = True
-
-			model.summary()
-			print(f"{self.name} loaded from {path}, please make sure that is what you want.")
-
-		else:
-			base_model = tf.keras.applications.xception.Xception(weights=None, include_top=False, input_shape=self.input_shape) 
-
-			x = self.pooling()(base_model.layers[-1].output)
-			if dropout_rate > 0.0:
-				x = tf.keras.layers.Dropout(dropout_rate)(x)
-			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x = tf.keras.layers.Dense(self.n_features, activation="relu")(x)
-			if self.mode == "triplet":
-				x = tf.keras.layers.Dense(self.n_features, activation=None)(x)
-
-			if self.bn_at_the_end:
-				x = tf.keras.layers.BatchNormalization()(x)
-
-			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x = tf.keras.layers.Dense(self.reverse_y_map_length, activation=None)(x)
-
-			model = tf.keras.models.Model(base_model.layers[0].input, x)
-
-			# model = self.make_model_ready(model, new_activation)
-
-			model.summary()
-			print(f"{self.name} is created, didn't load from {path}, please make sure that is what you want.")
-
-		self.model = model
-		return model
-
-	def different_model(self, new_activation=tf.keras.layers.ReLU(), dropout_rate: float = 0.0):	
-		if tf.io.gfile.exists(self.model_path):
-			model = tf.keras.models.load_model(self.model_path)
-			print(f"{self.name} loaded from {self.model_path}, please make sure that is what you want.")
-
-		else:
-			base_model = tf.keras.applications.xception.Xception(weights=None, include_top=False, input_shape=self.input_shape) 
-
-			x = base_model.layers[-1].output
-			if self.bn_at_the_end:
-				x = tf.keras.layers.BatchNormalization()(x)
-			x1, x2, x3, x4 = tf.keras.layers.Lambda(lambda x: tf.split(x, 4, axis=-1))(x)
-
-			x1 = tf.keras.layers.Conv2D(256, (1, 1), 1, activation="relu")(x1)
-			x1 = self.pooling()(x1)
-			if self.mode == "triplet":
-				x1 = tf.keras.layers.Dense(self.n_features, activation=None)(x1)
-			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x1 = tf.keras.layers.Dense(self.n_features, activation="relu")(x1)
-				if dropout_rate > 0.0:
-					x1 = tf.keras.layers.Dropout(dropout_rate)(x1)
-
-			x2 = tf.keras.layers.Conv2D(256, (1, 1), 1, activation="relu")(x2)
-			x2 = self.pooling()(x2)
-			if self.mode == "triplet":
-				x2 = tf.keras.layers.Dense(self.n_features, activation=None)(x2)
-			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x2 = tf.keras.layers.Dense(self.n_features, activation="relu")(x2)
-				if dropout_rate > 0.0:
-					x2 = tf.keras.layers.Dropout(dropout_rate)(x2)
-
-			x3 = tf.keras.layers.Conv2D(256, (1, 1), 1, activation="relu")(x3)
-			x3 = self.pooling()(x3)
-			if self.mode == "triplet":
-				x3 = tf.keras.layers.Dense(self.n_features, activation=None)(x3)
-			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x3 = tf.keras.layers.Dense(self.n_features, activation="relu")(x3)
-				if dropout_rate > 0.0:
-					x3 = tf.keras.layers.Dropout(dropout_rate)(x3)
-
-			x4 = tf.keras.layers.Conv2D(256, (1, 1), 1, activation="relu")(x4)
-			x4 = self.pooling()(x4)
-			if self.mode == "triplet":
-				x4 = tf.keras.layers.Dense(self.n_features, activation=None)(x4)
-			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x4 = tf.keras.layers.Dense(self.n_features, activation="relu")(x4)
-				if dropout_rate > 0.0:
-					x4 = tf.keras.layers.Dropout(dropout_rate)(x4)
-
-			x = tf.keras.layers.Add()([x1, x2, x3, x4])
-			x = tf.keras.layers.Dense(self.reverse_y_map_length, activation=None)(x)
-
-			model = tf.keras.models.Model(base_model.layers[0].input, x)
-			model = self.make_model_ready(model, new_activation)
-
-			print(f"{self.name} is created, didn't load from {self.model_path}, please make sure that is what you want.")
-			model.summary()
-
-		self.model = model
-		return model
-
-
 class InceptionRV1(MainModel):
 	name = "inception_resnet_v1"
 
-	def __init__(self, data_engine, generator_dataset_train, generator_dataset_test, batch_size: int, epochs: int, lr: float, mode: str = "softmax",
+	def __init__(self, data_engine, generator_dataset_train, generator_dataset_test, batch_size: int, epochs: int, lr: float,  use_center_loss: bool, mode: str = "softmax",
 		selected_loss=None, y_map=None, input_shape: tuple = (128, 128, 3), kernel_regularizer=tf.keras.regularizers.l2(), model_id: int = 0,
 		n_features: int = 128, pooling=tf.keras.layers.GlobalAveragePooling2D, bn_at_the_end: bool = False, new_name: str = None
 		):
@@ -549,7 +404,7 @@ class InceptionRV1(MainModel):
 		# self.new_name = f"models/{new_name}.h5"
 		# self.model_path = f"models/{new_name}.h5"
 
-		super().__init__(mode, selected_loss, y_map)
+		super().__init__(mode, use_center_loss, selected_loss, y_map)
 
 	def make_model_ready(self, model, new_activation):
 		for layer in model.layers:
@@ -572,7 +427,7 @@ class InceptionRV1(MainModel):
 			model = tf.keras.models.load_model(path, {"ReLU": tf.keras.layers.ReLU})  # {"LeakyReLU": tf.keras.layers.LeakyReLU}
 
 			if self.mode == "triplet" and from_softmax:
-				model = tf.keras.models.Model(model.layers[0].input, model.layers[-2].output) 
+				model = tf.keras.models.Model(model.layers[0].input, model.layers[-3].output) 
 				print("BE CAREFUL, DENSE LAYER HAS BEEN REMOVED")
 
 				if not self.bn_at_the_end and "BatchNormalization" in str(model.layers[-1]):
@@ -612,10 +467,12 @@ class InceptionRV1(MainModel):
 			x = self.pooling()(base_model.layers[-1].output)
 			if dropout_rate > 0.0:
 				x = tf.keras.layers.Dropout(dropout_rate)(x)
+
+			x1 = tf.keras.layers.Dense(self.n_features, activation=None)(x)
 			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x = tf.keras.layers.Dense(self.n_features, activation="relu")(x)
+				x = tf.keras.layers.ReLU()(x1)
 			if self.mode == "triplet":
-				x = tf.keras.layers.Dense(self.n_features, activation=None)(x)
+				x = x1
 
 			if self.bn_at_the_end:
 				x = tf.keras.layers.BatchNormalization()(x)  # momentum=0.995, epsilon=0.001, scale=False,
@@ -623,7 +480,7 @@ class InceptionRV1(MainModel):
 			if self.mode == "softmax" or self.mode == "sparse softmax":
 				x = tf.keras.layers.Dense(self.reverse_y_map_length, activation=None)(x)
 
-			model = tf.keras.models.Model(base_model.layers[0].input, x)
+			model = tf.keras.models.Model(base_model.layers[0].input, [x1, x])
 
 			model.summary()
 			print(f"{self.name} is created, didn't load from {path}, please make sure that is what you want.")
@@ -638,42 +495,20 @@ if __name__ == '__main__':
 
 	md = MainData("../datasets", mnist_path="../datasets/mnist")
 	md.run(real_examples = True, generated_examples = False, test_examples = False, mnist_examples=False, real_examples_will_be_reading=[
-	"CASIA_NEW_MAXPY/", "105_classes_pins_dataset"])
+	"CASIA_NEW_MAXPY/", "105_classes_pins_dataset/"])
 
 	# data_x, data_y = np.concatenate([md.g_real_paths, md.generated_paths]), np.concatenate([np.zeros((len(md.g_real_labels)), np.int32), np.ones((len(md.generated_paths)), np.int32)])
 	# real_dataset_train, real_dataset_test = md.create_tensorflow_dataset_object(data_x, data_y, supportive=False)
 
+	os.makedirs("processed_data", exist_ok=True)
 	real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/casia_and_mine_triplet.npy")
 
 	triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
 	# softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
 	# mnist_dataset_train, mnist_dataset_test = md.create_tensorflow_dataset_object(md.mnist_paths, md.mnist_labels, supportive=False)
 
-	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="triplet", selected_loss=None, y_map=md.real_y_map, lr=0.0001, n_features=512,
-	 bn_at_the_end=False, input_shape=(160, 160, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None, kernel_regularizer=tf.keras.regularizers.l2(5e-4))
-	xception_model.get_model(dropout_rate=0.2, from_softmax=False, from_triplet=False, freeze=False)
-	# xception_model.train_loop(n=1000, use_accuracy=False)
-	xception_model.test_with_monitoring()
-
-	"""
-	# DO NOT USE
-	from tqdm import tqdm
-	input("weird images will be deleted, are u sure?")
-
-	for i in tqdm(md.generated_paths):
-		try:
-			im = xception_model.load_image(i)
-		except Exception as e:
-			print(e)
-			os.remove(i)
-			print(f"Deleted --> {i}")
-
-	for i in tqdm(md.g_real_paths):
-		try:
-			im = xception_model.load_image(i)
-		except Exception as e:
-			print(e)
-			os.remove(i)
-			print(f"Deleted --> {i}")
-
-	"""
+	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="triplet", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
+	 lr=0.0001, n_features=512, bn_at_the_end=False, input_shape=(128, 128, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
+	  kernel_regularizer=tf.keras.regularizers.l2(5e-4))
+	xception_model.get_model(dropout_rate=0.2, from_softmax=True, from_triplet=False, freeze=False)
+	xception_model.train_loop(n=1000, use_accuracy=False)
