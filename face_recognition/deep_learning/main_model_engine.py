@@ -56,8 +56,9 @@ class MainModel:
 				features, output = output
 				center_loss = self.center_loss(features, y, 0.95)
 				loss = self._loss_function(y, output)
+				center_loss_factor = (tf.maximum(7.-loss, 0)**2) * 0.01
 
-				loss = (center_loss*self.center_lambda) + loss
+				loss = (center_loss * center_loss_factor) + loss
 
 			else:
 				loss = self._loss_function(y, output)
@@ -65,7 +66,7 @@ class MainModel:
 		gradients = tape.gradient(loss, self.model.trainable_variables)
 		self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
 
-		return loss, output
+		return loss, output, center_loss_factor
 
 	@tf.function
 	def test_step(self, x, y):
@@ -73,13 +74,8 @@ class MainModel:
 			output = self.model(x, training=False)
 			if self.use_center_loss:
 				features, output = output
-				center_loss = self.center_loss(features, y, 0.95)
-				loss = self._loss_function(y, output)
 
-				loss = (center_loss*self.center_lambda) + loss
-
-			else:
-				loss = self._loss_function(y, output)
+			loss = self._loss_function(y, output)
 
 		return loss, output
 
@@ -146,8 +142,6 @@ class MainModel:
 		self.reverse_y_map = {v: k for k, v in y_map.items()}
 		self.reverse_y_map_length = len(self.reverse_y_map)
 		self.y_map = y_map
-
-		self.center_lambda = 0.5
 
 		if self.use_center_loss:
 			if os.path.exists(f"models/centers_for_{self.mode}_{self.name}.npy"):
@@ -235,7 +229,7 @@ class MainModel:
 		print(f"Training loop is activated.")
 		
 		self.tensorboard.initialize()
-		data_json = {"loss": None}
+		data_json = {"loss": None, "center loss factor": None}
 		if use_accuracy:
 			data_json["acc"] = None
 
@@ -253,10 +247,11 @@ class MainModel:
 			for x, y in self.dataset_train:
 				x = tf.reshape(x, (-1, self.input_shape[0], self.input_shape[1], self.input_shape[2]))
 
-				loss, output = self.train_step(x, y) 
+				loss, output, center_loss_factor = self.train_step(x, y) 
 				loss_mean(loss)
 
 				data_json["loss"] = loss
+				data_json["center loss factor"] = center_loss_factor
 				main_bar_list = [["loss", loss_mean.result().numpy()]]
 
 				if use_accuracy:
@@ -495,20 +490,20 @@ if __name__ == '__main__':
 
 	md = MainData("../datasets", mnist_path="../datasets/mnist")
 	md.run(real_examples = True, generated_examples = False, test_examples = False, mnist_examples=False, real_examples_will_be_reading=[
-	"CASIA_NEW_MAXPY/", "105_classes_pins_dataset/"])
+	"CASIA_NEW_MAXPY/"])
 
 	# data_x, data_y = np.concatenate([md.g_real_paths, md.generated_paths]), np.concatenate([np.zeros((len(md.g_real_labels)), np.int32), np.ones((len(md.generated_paths)), np.int32)])
 	# real_dataset_train, real_dataset_test = md.create_tensorflow_dataset_object(data_x, data_y, supportive=False)
 
-	os.makedirs("processed_data", exist_ok=True)
-	real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/casia_and_mine_triplet.npy")
+	# os.makedirs("processed_data", exist_ok=True)
+	# real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/casia_and_mine_triplet.npy")
 
-	triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
-	# softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
+	# triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
+	softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
 	# mnist_dataset_train, mnist_dataset_test = md.create_tensorflow_dataset_object(md.mnist_paths, md.mnist_labels, supportive=False)
 
-	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="triplet", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
-	 lr=0.0001, n_features=512, bn_at_the_end=False, input_shape=(128, 128, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
+	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="softmax", use_center_loss=True, selected_loss=None, y_map=md.real_y_map,
+	 lr=0.001, n_features=512, bn_at_the_end=True, input_shape=(128, 128, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
 	  kernel_regularizer=tf.keras.regularizers.l2(5e-4))
-	xception_model.get_model(dropout_rate=0.2, from_softmax=True, from_triplet=False, freeze=False)
-	xception_model.train_loop(n=1000, use_accuracy=False)
+	xception_model.get_model(dropout_rate=0.2, from_softmax=False, from_triplet=False, freeze=False)
+	xception_model.train_loop(n=1000, use_accuracy=True)
