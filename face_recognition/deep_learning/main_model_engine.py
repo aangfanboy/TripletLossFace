@@ -50,29 +50,29 @@ class MainModel:
 
 	@tf.function
 	def train_step(self, x, y):
+		center_loss = 0.0
 		with tf.GradientTape() as tape:
 			output = self.model(x, training=True)
-			if self.use_center_loss:
+
+			if self.mode != "triplet":
 				features, output = output
+			if self.use_center_loss:
 				center_loss = self.center_loss(features, y, 0.95)
 				loss = self._loss_function(y, output)
-				center_loss_factor = (tf.maximum(7.-loss, 0)**2) * 0.01
-
-				loss = (center_loss * center_loss_factor) + loss
-
+				loss = (center_loss * 0.01) + loss
 			else:
 				loss = self._loss_function(y, output)
 
 		gradients = tape.gradient(loss, self.model.trainable_variables)
 		self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
 
-		return loss, output, center_loss_factor
+		return loss, output, center_loss
 
 	@tf.function
 	def test_step(self, x, y):
 		with tf.GradientTape() as tape:
 			output = self.model(x, training=False)
-			if self.use_center_loss:
+			if self.mode != "triplet":
 				features, output = output
 
 			loss = self._loss_function(y, output)
@@ -102,7 +102,7 @@ class MainModel:
 		image = tf.image.resize(image, (self.input_shape[0], self.input_shape[1]), method="nearest")
 		image = tf.image.random_flip_left_right(image)
 
-		return tf.divide(tf.cast(image, tf.float32), 255.)
+		return tf.divide(tf.cast(image, tf.float32), 255.)  # (tf.cast(image, tf.float32) - 127.5)/128.0
 
 	def mapper_triplet(self, path, label):
 		return [self.load_image(path[0]), self.load_image(path[1]), self.load_image(path[2])], label
@@ -299,12 +299,25 @@ class MainModel:
 			dataset = self.dataset_test
 
 		bar = tf.keras.utils.Progbar(self.data_engine.get_dataset_length(dataset))
+		th = -0.54
 
+		cosine_loss = tf.keras.losses.CosineSimilarity()
 		for x, y in dataset:
 			x = tf.reshape(x, (-1, self.input_shape[0], self.input_shape[1], self.input_shape[2]))
-			loss, output = self.test_step(x, y) 
+			loss, output = self.test_step(x, y)
 
 			main_bar_list = [["validation loss", loss]]
+			if self.mode == "triplet":
+				anchor, positive, negative = tf.unstack(tf.reshape(output, (-1, 3, self.n_features)), num=3, axis=1)
+				accs = []
+				for i in range(len(anchor)):
+					if cosine_loss(anchor[i], positive[i]) <= th and cosine_loss(anchor[i], negative[i]) > th and cosine_loss(negative[i], positive[i]) > th:
+						accs.append(1.)
+					else:
+						accs.append(0.)
+
+				main_bar_list.append(["triplet acc", np.mean(accs)])
+
 			if use_accuracy:
 				acc = self.calculate_accuracy(y, output)
 				main_bar_list.append(["validation acc", acc])
@@ -422,7 +435,7 @@ class InceptionRV1(MainModel):
 			model = tf.keras.models.load_model(path, {"ReLU": tf.keras.layers.ReLU})  # {"LeakyReLU": tf.keras.layers.LeakyReLU}
 
 			if self.mode == "triplet" and from_softmax:
-				model = tf.keras.models.Model(model.layers[0].input, model.layers[-3].output) 
+				model = tf.keras.models.Model(model.layers[0].input, model.layers[-4].output) 
 				print("BE CAREFUL, DENSE LAYER HAS BEEN REMOVED")
 
 				if not self.bn_at_the_end and "BatchNormalization" in str(model.layers[-1]):
@@ -490,20 +503,21 @@ if __name__ == '__main__':
 
 	md = MainData("../datasets", mnist_path="../datasets/mnist")
 	md.run(real_examples = True, generated_examples = False, test_examples = False, mnist_examples=False, real_examples_will_be_reading=[
-	"CASIA_NEW_MAXPY/"])
+	"105_classes_pins_dataset/"])
 
 	# data_x, data_y = np.concatenate([md.g_real_paths, md.generated_paths]), np.concatenate([np.zeros((len(md.g_real_labels)), np.int32), np.ones((len(md.generated_paths)), np.int32)])
 	# real_dataset_train, real_dataset_test = md.create_tensorflow_dataset_object(data_x, data_y, supportive=False)
 
-	# os.makedirs("processed_data", exist_ok=True)
-	# real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/casia_and_mine_triplet.npy")
+	os.makedirs("processed_data", exist_ok=True)
+	real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/mine_triplet.npy")
 
-	# triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
-	softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
+	triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
+	# softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
 	# mnist_dataset_train, mnist_dataset_test = md.create_tensorflow_dataset_object(md.mnist_paths, md.mnist_labels, supportive=False)
 
-	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="softmax", use_center_loss=True, selected_loss=None, y_map=md.real_y_map,
-	 lr=0.001, n_features=512, bn_at_the_end=True, input_shape=(128, 128, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
+	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="triplet", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
+	 lr=0.0001, n_features=512, bn_at_the_end=True, input_shape=(160, 160, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
 	  kernel_regularizer=tf.keras.regularizers.l2(5e-4))
 	xception_model.get_model(dropout_rate=0.2, from_softmax=False, from_triplet=False, freeze=False)
-	xception_model.train_loop(n=1000, use_accuracy=True)
+	xception_model.test_without_monitoring()
+	# xception_model.train_loop(n=1000, use_accuracy=False)
