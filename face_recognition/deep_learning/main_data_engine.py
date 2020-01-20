@@ -200,7 +200,7 @@ class MainData:
 	def create_tensorflow_dataset_object(self, paths, labels, test_rate: float = 0.1, test_data: tuple = (None, None), supportive: bool = False):
 		print("Creating TensorFlow dataset object...")
 		if type(test_data) != tuple:
-			printl("\"test_data\" must be tuple for 'create_tensorflow_dataset_object', test data will be taken from real data " + 
+			print("\"test_data\" must be tuple for 'create_tensorflow_dataset_object', test data will be taken from real data " + 
 				f"with rate of {test_rate}. You have 5 seconds to stop the process and cancel running. Use Ctrl+C to do that.")
 
 			time.sleep(5)
