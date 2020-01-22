@@ -4,7 +4,7 @@ import numpy as np
 import tensorflow as tf
 
 from main_data_engine import MainData
-from model_archs import inception_resnet_v1
+from model_archs import inception_resnet_v1, xception
 
 
 class TensorBoardCallback:
@@ -102,7 +102,7 @@ class MainModel:
 		image = tf.image.resize(image, (self.input_shape[0], self.input_shape[1]), method="nearest")
 		image = tf.image.random_flip_left_right(image)
 
-		return tf.divide(tf.cast(image, tf.float32), 255.)  # (tf.cast(image, tf.float32) - 127.5)/128.0
+		return (tf.cast(image, tf.float32) - 127.5)/128.0
 
 	def mapper_triplet(self, path, label):
 		return [self.load_image(path[0]), self.load_image(path[1]), self.load_image(path[2])], label
@@ -382,8 +382,8 @@ class InceptionRV1(MainModel):
 
 	def __init__(self, data_engine, generator_dataset_train, generator_dataset_test, batch_size: int, epochs: int, lr: float,  use_center_loss: bool, mode: str = "softmax",
 		selected_loss=None, y_map=None, input_shape: tuple = (128, 128, 3), kernel_regularizer=tf.keras.regularizers.l2(), model_id: int = 0,
-		n_features: int = 128, pooling=tf.keras.layers.GlobalAveragePooling2D, bn_at_the_end: bool = False, new_name: str = None
-		):
+		n_features: int = 128, pooling=tf.keras.layers.GlobalAveragePooling2D, bn_at_the_end: bool = False, new_name: str = None,
+		 model_p = inception_resnet_v1.InceptionResNetV1):
 
 		self.model_path = f"models/{mode}_{self.name}_0.h5"
 		self.data_engine = data_engine
@@ -397,6 +397,7 @@ class InceptionRV1(MainModel):
 		self.input_shape = input_shape
 		self.bn_at_the_end = bn_at_the_end
 		self.kernel_regularizer = kernel_regularizer
+		self.model_p = model_p
 
 		os.makedirs("models", exist_ok=True)
 
@@ -470,7 +471,7 @@ class InceptionRV1(MainModel):
 			print(f"{self.name} loaded from {path}, please make sure that is what you want.")
 
 		else:
-			base_model = inception_resnet_v1.InceptionResNetV1(self.input_shape)
+			base_model = self.model_p(self.input_shape)
 
 			x = self.pooling()(base_model.layers[-1].output)
 			if dropout_rate > 0.0:
@@ -508,16 +509,16 @@ if __name__ == '__main__':
 	# data_x, data_y = np.concatenate([md.g_real_paths, md.generated_paths]), np.concatenate([np.zeros((len(md.g_real_labels)), np.int32), np.ones((len(md.generated_paths)), np.int32)])
 	# real_dataset_train, real_dataset_test = md.create_tensorflow_dataset_object(data_x, data_y, supportive=False)
 
-	os.makedirs("processed_data", exist_ok=True)
-	real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/mine_triplet.npy")
+	# os.makedirs("processed_data", exist_ok=True)
+	# real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/mine_triplet.npy")
 
-	triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
-	# softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
+	# triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
+	softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
 	# mnist_dataset_train, mnist_dataset_test = md.create_tensorflow_dataset_object(md.mnist_paths, md.mnist_labels, supportive=False)
 
-	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="triplet", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
-	 lr=0.0001, n_features=512, bn_at_the_end=True, input_shape=(160, 160, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
-	  kernel_regularizer=tf.keras.regularizers.l2(5e-4))
+	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="softmax", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
+	 lr=0.001, n_features=512, bn_at_the_end=True, input_shape=(160, 160, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
+	  kernel_regularizer=tf.keras.regularizers.l2(5e-4), model_p=xception.xception)
 	xception_model.get_model(dropout_rate=0.2, from_softmax=False, from_triplet=False, freeze=False)
-	xception_model.test_without_monitoring()
-	# xception_model.train_loop(n=1000, use_accuracy=False)
+	# xception_model.test_without_monitoring()
+	xception_model.train_loop(n=1000, use_accuracy=True)
