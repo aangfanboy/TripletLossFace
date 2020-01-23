@@ -299,7 +299,7 @@ class MainModel:
 			dataset = self.dataset_test
 
 		bar = tf.keras.utils.Progbar(self.data_engine.get_dataset_length(dataset))
-		th = -0.54
+		th = -0.7
 
 		cosine_loss = tf.keras.losses.CosineSimilarity()
 		for x, y in dataset:
@@ -337,6 +337,7 @@ class MainModel:
 				output = tf.nn.l2_normalize(output, 1, 1e-10)
 
 				anchor, positive, negative = tf.unstack(tf.reshape(output, (-1, 3, self.n_features)), num=3, axis=1)
+				x = ((x * 128.0) + 127.5)/255.
 
 				for i in range(anchor.shape[0]):
 					d1 = round(float(np.linalg.norm(anchor[i] - positive[i])), 3)  # small
@@ -504,7 +505,7 @@ if __name__ == '__main__':
 
 	md = MainData("../datasets", mnist_path="../datasets/mnist")
 	md.run(real_examples = True, generated_examples = False, test_examples = False, mnist_examples=False, real_examples_will_be_reading=[
-	"105_classes_pins_dataset/"])
+	"ms1m/"])
 
 	# data_x, data_y = np.concatenate([md.g_real_paths, md.generated_paths]), np.concatenate([np.zeros((len(md.g_real_labels)), np.int32), np.ones((len(md.generated_paths)), np.int32)])
 	# real_dataset_train, real_dataset_test = md.create_tensorflow_dataset_object(data_x, data_y, supportive=False)
@@ -513,12 +514,12 @@ if __name__ == '__main__':
 	# real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/mine_triplet.npy")
 
 	# triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
-	softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False)
+	softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False,test_rate=0.01)
 	# mnist_dataset_train, mnist_dataset_test = md.create_tensorflow_dataset_object(md.mnist_paths, md.mnist_labels, supportive=False)
 
-	xception_model = InceptionRV1(md, None, None, batch_size=16, epochs=10, mode="softmax", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
-	 lr=0.001, n_features=512, bn_at_the_end=True, input_shape=(160, 160, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
-	  kernel_regularizer=tf.keras.regularizers.l2(5e-4), model_p=xception.xception)
+	xception_model = InceptionRV1(md, None, None, batch_size=32, epochs=10, mode="softmax", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
+	 lr=0.001, n_features=512, bn_at_the_end=True, input_shape=(112, 112, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
+	  kernel_regularizer=tf.keras.regularizers.l2(5e-4))
 	xception_model.get_model(dropout_rate=0.2, from_softmax=False, from_triplet=False, freeze=False)
-	# xception_model.test_without_monitoring()
+	# xception_model.test_with_monitoring()
 	xception_model.train_loop(n=1000, use_accuracy=True)
