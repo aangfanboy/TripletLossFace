@@ -1,5 +1,6 @@
 import os
 import cv2
+import math
 import numpy as np
 import tensorflow as tf
 
@@ -32,6 +33,31 @@ class TensorBoardCallback:
 			tf.summary.text(name, data, step=step)
 
 
+class NormDense(tf.keras.layers.Layer):
+	def __init__(self, classes=105, **kwargs):
+		super(NormDense, self).__init__()
+		self.classes = classes
+
+	def build(self, input_shape):
+		self.kernel = self.add_weight(name='norm_dense_w', shape=(input_shape[-1], self.classes), initializer='random_normal', trainable=True)
+
+		super(NormDense, self).build(input_shape)
+
+	def call(self, inputs, **kwargs):
+		norm_w = tf.nn.l2_normalize(self.kernel, axis=0)
+		x = tf.matmul(inputs, norm_w)
+
+		return x
+
+	def compute_output_shape(self, input_shape):
+		return (input_shape[0], self.output_dim)
+
+	def get_config(self):
+
+		config = super().get_config()
+		return config
+
+
 class MainModel:
 	def calculate_accuracy(self, y_real, y_pred):
 		return tf.reduce_mean(tf.cast(tf.equal(tf.argmax(tf.nn.softmax(y_pred), -1), tf.argmax(y_real, -1)), tf.float32))
@@ -55,13 +81,24 @@ class MainModel:
 			output = self.model(x, training=True)
 
 			if self.mode != "triplet":
-				features, output = output
+				if self.mode == "arcface":
+					features, norm_dense, output = output
+				else:
+					features, output = output
+
 			if self.use_center_loss:
 				center_loss = self.center_loss(features, y, 0.95)
 				loss = self._loss_function(y, output)
+				if self.mode == "arcface":
+					loss, output = self._loss_function(y, output, norm_dense)
+				else:
+					loss = self._loss_function(y, output)
 				loss = (center_loss * 0.01) + loss
 			else:
-				loss = self._loss_function(y, output)
+				if self.mode == "arcface":
+					loss, output = self._loss_function(y, output, norm_dense)
+				else:
+					loss = self._loss_function(y, output)
 
 		gradients = tape.gradient(loss, self.model.trainable_variables)
 		self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
@@ -73,9 +110,15 @@ class MainModel:
 		with tf.GradientTape() as tape:
 			output = self.model(x, training=False)
 			if self.mode != "triplet":
-				features, output = output
+				if self.mode == "arcface":
+					features, norm_dense, output = output
+				else:
+					features, output = output
 
-			loss = self._loss_function(y, output)
+			if self.mode == "arcface":
+				loss, output = self._loss_function(y, output, norm_dense)
+			else:
+				loss = self._loss_function(y, output)
 
 		return loss, output
 
@@ -110,6 +153,9 @@ class MainModel:
 	def mapper_softmax(self, path, label):
 		return self.load_image(path), tf.one_hot(label, self.reverse_y_map_length)
 
+	def mapper_arcface(self, path, label):
+		return self.load_image(path), label
+
 	def set_dataset_ready(self, dataset, set_map: bool = True, set_batch: bool = True):
 		dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
@@ -119,6 +165,8 @@ class MainModel:
 					dataset = dataset.map(self.mapper_triplet, tf.data.experimental.AUTOTUNE)
 				elif self.mode == "softmax" or self.mode == "sparse softmax":
 					dataset = dataset.map(self.mapper_softmax, tf.data.experimental.AUTOTUNE)
+				elif self.mode == "arcface":
+					dataset = dataset.map(self.mapper_arcface, tf.data.experimental.AUTOTUNE)
 				else:
 					raise Exception(f"There is no mapping function for {self.mode}, please fix.")
 			except ValueError:
@@ -130,6 +178,22 @@ class MainModel:
 		print("Dataset ready for stream.")
 
 		return dataset
+
+	def arcface_loss(self, labels, x, normx_cos, m1=1.0, m2=0.2, m3=0.3, s=64.0):
+		norm_x = tf.norm(x, axis=1, keepdims=True)
+		cos_theta = normx_cos / norm_x
+		theta = tf.acos(cos_theta)
+		mask = tf.one_hot(labels, depth=normx_cos.shape[-1])
+		zeros = tf.zeros_like(mask)
+		cond = tf.where(tf.greater(theta * m1 + m3, math.pi), zeros, mask)
+		cond = tf.cast(cond, dtype=tf.bool)
+		m1_theta_plus_m3 = tf.where(cond, theta * m1 + m3, theta)
+		cos_m1_theta_plus_m3 = tf.cos(m1_theta_plus_m3)
+		prelogits = tf.where(cond, cos_m1_theta_plus_m3 - m2, cos_m1_theta_plus_m3) * s
+
+		loss = self.sparse(mask, prelogits)
+
+		return loss, prelogits
 
 	def __init__(self, mode: str = "softmax", use_center_loss: bool = False, selected_loss=None, y_map=None):
 		self.mode = mode
@@ -154,6 +218,10 @@ class MainModel:
 			if self.mode == "triplet":
 				self._loss_function = self.triplet_loss
 
+			if self.mode == "arcface":
+				self.sparse = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
+				self._loss_function = self.arcface_loss
+
 			if self.mode == "softmax":
 				self._loss_function = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
 
@@ -161,7 +229,8 @@ class MainModel:
 				self._loss_function = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
 			if self._loss_function is None:
-				raise Exception(f"ERROR, {self.mode} is not an option. Use: 'triplet', 'softmax' or 'sparse softmax' ")
+				raise Exception(f"ERROR, {self.mode} is not an option. Use: 'triplet', 'arcface', softmax' or 'sparse softmax' ")
+
 		if selected_loss is not None:
 			self._loss_function = selected_loss
 
@@ -255,7 +324,7 @@ class MainModel:
 				main_bar_list = [["loss", loss_mean.result().numpy()]]
 
 				if use_accuracy:
-					acc = self.calculate_accuracy(y, output)
+					acc = self.calculate_accuracy(tf.one_hot(y, self.reverse_y_map_length), output)
 					acc_mean(acc)
 					data_json["acc"] = acc
 					main_bar_list.append(["acc", acc_mean.result().numpy()])
@@ -423,7 +492,7 @@ class InceptionRV1(MainModel):
 
 		return model
 
-	def get_model(self, new_activation=tf.keras.layers.ReLU(), dropout_rate: float = 0.0, from_softmax=False, from_triplet=False, freeze=False):
+	def get_model(self, new_activation=tf.keras.layers.ReLU(), dropout_rate: float = 0.0, from_softmax=False, from_arcface=False, from_triplet=False, freeze=False):
 		if freeze and not from_triplet:
 			raise Exception("if you want to use 'freeze', you must set 'from_triplet' to True.")
 
@@ -432,17 +501,22 @@ class InceptionRV1(MainModel):
 			path = path.replace(self.mode, "softmax")
 		if from_triplet:
 			path = path.replace(self.mode, "triplet")
+		if from_arcface:
+			path = path.replace(self.mode, "arcface")
 
 		if tf.io.gfile.exists(path):
-			model = tf.keras.models.load_model(path, {"ReLU": tf.keras.layers.ReLU})  # {"LeakyReLU": tf.keras.layers.LeakyReLU}
+			model = tf.keras.models.load_model(path, {"ReLU": tf.keras.layers.ReLU, "NormDense": NormDense})  # {"LeakyReLU": tf.keras.layers.LeakyReLU}
 
-			if self.mode == "triplet" and from_softmax:
-				model = tf.keras.models.Model(model.layers[0].input, model.layers[-4].output) 
+			if self.mode == "triplet" and (from_softmax or from_arcface):
+				nn = 4
+				if from_arcface:
+					nn = 3
+				model = tf.keras.models.Model(model.layers[0].input, model.layers[-nn].output) 
 				print("BE CAREFUL, DENSE LAYER HAS BEEN REMOVED")
 
 				if not self.bn_at_the_end and "BatchNormalization" in str(model.layers[-1]):
 					model = tf.keras.models.Model(model.layers[0].input, model.layers[-2].output) 
-					print("BE CAREFUL, BatchNormalization LAYER HAS BEEN REMOVED")					
+					print("BE CAREFUL, BatchNormalization LAYER HAS BEEN REMOVED")				
 
 				model.layers[-1].activation = None
 
@@ -479,7 +553,7 @@ class InceptionRV1(MainModel):
 				x = tf.keras.layers.Dropout(dropout_rate)(x)
 
 			x1 = tf.keras.layers.Dense(self.n_features, activation=None)(x)
-			if self.mode == "softmax" or self.mode == "sparse softmax":
+			if self.mode == "softmax" or self.mode == "sparse softmax" or self.mode == "arcface":
 				x = tf.keras.layers.ReLU()(x1)
 			if self.mode == "triplet":
 				x = x1
@@ -487,15 +561,20 @@ class InceptionRV1(MainModel):
 			if self.bn_at_the_end:
 				x = tf.keras.layers.BatchNormalization()(x)  # momentum=0.995, epsilon=0.001, scale=False,
 
-			if self.mode == "softmax" or self.mode == "sparse softmax":
-				x = tf.keras.layers.Dense(self.reverse_y_map_length, activation=None)(x)
+			if self.mode == "softmax" or self.mode == "sparse softmax" or self.mode == "arcface":
+				xl1 = tf.keras.layers.Dense(self.reverse_y_map_length, activation=None)(x)
 
-			model = tf.keras.models.Model(base_model.layers[0].input, [x1, x])
+			if self.mode != "arcface":
+				model = tf.keras.models.Model(base_model.layers[0].input, [x1, xl1])
+
+			if self.mode == "arcface":
+				norm_dense = NormDense(self.reverse_y_map_length)(x)
+				model = tf.keras.models.Model(base_model.layers[0].input, [x1, norm_dense, xl1])
 
 			model.summary()
 			print(f"{self.name} is created, didn't load from {path}, please make sure that is what you want.")
 
-		model = self.make_model_ready(model, new_activation)
+		# model = self.make_model_ready(model, new_activation)
 		self.model = model
 		return model
 
@@ -504,22 +583,22 @@ if __name__ == '__main__':
 	os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 
 	md = MainData("../datasets", mnist_path="../datasets/mnist")
-	md.run(real_examples = True, generated_examples = False, test_examples = False, mnist_examples=False, real_examples_will_be_reading=[
-	"ms1m/"])
+	md.run(real_examples = False, generated_examples = False, test_examples = False, mnist_examples=True, real_examples_will_be_reading=[
+	"105_classes_pins_dataset/"])
 
 	# data_x, data_y = np.concatenate([md.g_real_paths, md.generated_paths]), np.concatenate([np.zeros((len(md.g_real_labels)), np.int32), np.ones((len(md.generated_paths)), np.int32)])
 	# real_dataset_train, real_dataset_test = md.create_tensorflow_dataset_object(data_x, data_y, supportive=False)
 
 	# os.makedirs("processed_data", exist_ok=True)
-	# real_new_x, real_new_y = md.create_main_triplet_dataset(md.real_paths, md.real_labels, 200, data_path="processed_data/mine_triplet.npy")
+	# real_new_x, real_new_y = md.create_main_triplet_dataset(md.mnist_paths, md.mnist_labels, 200, data_path="processed_data/mnist_triplet.npy")
 
 	# triplet_dataset_train, triplet_dataset_test = md.create_tensorflow_dataset_object(real_new_x, real_new_y, supportive=False)
-	softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False,test_rate=0.01)
-	# mnist_dataset_train, mnist_dataset_test = md.create_tensorflow_dataset_object(md.mnist_paths, md.mnist_labels, supportive=False)
+	# softmax_dataset_train, softmax_dataset_test = md.create_tensorflow_dataset_object(md.real_paths, md.real_labels, supportive=False,test_rate=0.01)
+	mnist_dataset_train, mnist_dataset_test = md.create_tensorflow_dataset_object(md.mnist_paths, md.mnist_labels, supportive=False)
 
-	xception_model = InceptionRV1(md, None, None, batch_size=32, epochs=10, mode="softmax", use_center_loss=False, selected_loss=None, y_map=md.real_y_map,
-	 lr=0.001, n_features=512, bn_at_the_end=True, input_shape=(112, 112, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
+	xception_model = InceptionRV1(md, None, None, batch_size=128, epochs=50, mode="arcface", use_center_loss=False, selected_loss=None, y_map=md.mnist_y_map,
+	 lr=0.01, n_features=512, bn_at_the_end=False, input_shape=(96, 96, 3), pooling=tf.keras.layers.GlobalAveragePooling2D, new_name=None,
 	  kernel_regularizer=tf.keras.regularizers.l2(5e-4))
-	xception_model.get_model(dropout_rate=0.2, from_softmax=False, from_triplet=False, freeze=False)
+	xception_model.get_model(dropout_rate=0.2, from_softmax=False, from_arcface=False, from_triplet=False, freeze=False)
 	# xception_model.test_with_monitoring()
 	xception_model.train_loop(n=1000, use_accuracy=True)
